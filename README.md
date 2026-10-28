@@ -25,15 +25,44 @@ verified against, and the "Always-On Mode" section (§7) covering idle/sleep.
 4. **Resilience** — failed pings retry on a short backoff, and the popup/badge
    show `OK`/`NET`/`EXP` so you always know the real state.
 
-## Install (unpacked)
+## Install
 
-1. Open `brave://extensions` (or `chrome://extensions`).
-2. Enable **Developer mode** (top right).
-3. Click **Load unpacked** and select this directory.
-4. Open or reload your ERP tab (`erp.iitkgp.ac.in/IIT_ERP3/showmenu.htm`) so
-   the content scripts attach.
-5. Click the extension icon to see live status, change the ping interval, or
-   ping immediately.
+This isn't published on the Chrome Web Store (no developer fee paid), so it's
+installed the same way any unpacked/developer extension is — this works
+identically in Chrome and Brave.
+
+**1. Download the code**
+
+- Go to https://github.com/amaannn08/erp-sessionActive
+- Click the green **`<> Code`** button → **Download ZIP**
+- Unzip it somewhere you won't delete (e.g. `Documents/erp-sessionActive`) —
+  Chrome loads the extension from this folder every time it starts, so don't
+  move or delete it afterwards.
+
+(Or, if you use git: `git clone https://github.com/amaannn08/erp-sessionActive.git`)
+
+**2. Load it into the browser**
+
+1. Open `chrome://extensions` (or `brave://extensions` in Brave).
+2. Turn on **Developer mode** — toggle in the top-right corner.
+3. Click **Load unpacked**.
+4. Select the unzipped `erp-sessionActive` folder (the one containing
+   `manifest.json` directly inside it, not a subfolder).
+5. The extension should now appear with the shield-and-clock icon.
+
+**3. Activate it**
+
+1. Open or reload your ERP tab (`erp.iitkgp.ac.in/IIT_ERP3/showmenu.htm`) so
+   the content scripts attach — a tab that was already open before you loaded
+   the extension needs a refresh.
+2. Click the extension icon in the toolbar to see live status, change the
+   ping interval, or ping immediately. Pin it (puzzle-piece icon → pin) so
+   it's always visible.
+
+**Note for anyone you share this with:** because it's unpacked rather than
+from the Web Store, Chrome will occasionally show a one-time "Disable
+developer mode extensions" nag banner on startup — this is normal for any
+unpacked extension and can be dismissed; it does not disable the extension.
 
 ## Files
 
@@ -45,6 +74,12 @@ content/content.js          ISOLATED world — pings, expiry reporting, modal wa
 popup/                      Status UI
 icons/                       Extension icons (generated from icons/icon.svg)
 ```
+
+## Privacy
+
+This extension collects nothing and talks to no server other than
+`erp.iitkgp.ac.in`. Full policy: [PRIVACY.md](PRIVACY.md) (also mirrored at
+https://gist.github.com/amaannn08/08ba57918d198cda764fae30e3db8183).
 
 ## Known limits
 
