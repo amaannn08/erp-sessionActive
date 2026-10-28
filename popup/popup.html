@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ERP Session Active</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="card">
+    <header>
+      <div class="brand">
+        <img src="../icons/icon-48.png" alt="" width="22" height="22" />
+        <span>ERP Session Keeper</span>
+      </div>
+      <label class="switch" title="Keep-alive on/off">
+        <input type="checkbox" id="enabledToggle" />
+        <span class="slider"></span>
+      </label>
+    </header>
+
+    <section class="status" id="statusSection">
+      <div class="status-row">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusLabel">Checking...</span>
+      </div>
+      <div class="countdown" id="countdown">--:--</div>
+      <div class="countdown-sub">remaining before 30-min idle logout</div>
+    </section>
+
+    <section class="meta">
+      <div class="meta-row">
+        <span>Last heartbeat</span>
+        <span id="lastPingTime">—</span>
+      </div>
+      <div class="meta-row">
+        <span>Response</span>
+        <span id="lastPingStatus">—</span>
+      </div>
+    </section>
+
+    <section class="controls">
+      <button id="pingNowBtn" class="btn primary">Ping Now</button>
+      <button id="openTabBtn" class="btn">Open ERP Tab</button>
+    </section>
+
+    <section class="interval">
+      <span>Heartbeat interval</span>
+      <select id="intervalSelect">
+        <option value="3">3 min</option>
+        <option value="5" selected>5 min (recommended)</option>
+        <option value="8">8 min</option>
+        <option value="10">10 min</option>
+      </select>
+    </section>
+
+    <section class="history">
+      <div class="history-title">Recent activity</div>
+      <ul id="historyList"></ul>
+    </section>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
