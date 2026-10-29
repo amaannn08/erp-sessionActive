@@ -235,3 +235,114 @@ So for "screen off / idle", the extension keeps running, and the plan has to def
    - d. Freeze the tab via `chrome://discards` → "Freeze", wait more than 30 min, unfreeze, and confirm no logout.
    - e. Disable Wi-Fi for 3 min and confirm the badge shows `NET`, then recovers without logout.
    - f. Overnight run for unknown 7.6-2.
+
+---
+
+## 8. Diagnostics: richer failure context & history that survives an incident
+
+### 8.1 Why (postmortem from 2026-10-29)
+The ERP logged the user out overnight even though the laptop never slept, Brave
+never restarted, and the network never dropped (confirmed via `journalctl` and
+the extension's own ping history during the incident). The actual cause: the
+server itself stopped confirming the session (`keepAlive.htm` kept returning
+`200` but without `Session Extended` in the body) for about 45 minutes
+starting ~07:12, then a real re-login happened at ~07:57. This matches the
+unverified item in §7.6-2: an absolute/server-side session-kill independent of
+keep-alive activity (most likely a nightly maintenance window).
+
+Diagnosing this took reading `journalctl` and the extension's raw
+`chrome.storage.local` state by hand. Two things made it harder than it should
+have been:
+1. **The history ring buffer (30 entries) got entirely consumed by one
+   incident** — every single failed ping (one every 1-2 min for 45 min) got
+   its own entry, pushing out everything from earlier in the night.
+2. **Failure entries carried almost no detail** — `"Ping returned status 200
+   (session likely expired)"` doesn't distinguish a maintenance page, a login
+   page, a WAF block, or a redirect loop.
+
+### 8.2 Changes
+
+**A. Capture richer ping-failure detail** (`content/content.js`, `background/service-worker.js`)
+- `ping()` already has `res.redirected` and the body text in scope — carry
+  them through instead of discarding them. New shape for a ping result:
+  ```js
+  { ok, status, at, redirected, finalUrl /* res.url */, snippet /* first ~200 chars of body, whitespace-collapsed, only on failure */ }
+  ```
+- `pingDirect()` in the service worker (the SW-direct fallback) gets the same
+  fields, for parity.
+- Never store more than ~200 characters of the body, and only on failure (a
+  successful ping's body is always just `"Session Extended"`, no need to
+  store it). This is plenty to tell a login-page redirect apart from a
+  maintenance banner apart from a WAF/captive-portal page, without risking
+  storing anything sensitive — the keep-alive endpoint never echoes
+  credentials or personal data.
+
+**B. Coalesce repeated identical failures into one history entry**
+(`background/service-worker.js`)
+- Before pushing a new history entry, compare it to the most recent one
+  (`history[0]`). If the new entry's `type` is the same AND (for pings)
+  `status` + `redirected` match, **merge**: bump `count`, update `lastAt`,
+  keep the *first* `snippet` seen (the first occurrence is the most useful
+  one — later ones are just noise confirming it's still down). Otherwise push
+  a new entry with `count: 1`.
+- New entry shape: `{ at, lastAt, count, type, detail, status?, redirected?, finalUrl?, snippet? }`.
+- Effect: a 45-minute outage of identical failures becomes **one** entry
+  instead of ~25, so the same 30-slot buffer now spans days instead of being
+  wiped out by a single incident. Bump `MAX_HISTORY` to 60 anyway as a
+  backstop (cheap — each entry is well under 1KB even with a snippet).
+
+**C. Track incident start/end explicitly** (`background/service-worker.js`)
+- Add `state.deadSince`: set to `Date.now()` the moment a ping transitions
+  from ok → fail (i.e. `consecutiveFailures` goes 0 → 1); cleared back to
+  `null` the moment a ping succeeds again.
+- Badge title and popup status line show "Session expired since 07:12" using
+  this, instead of just "EXP" — so next time, the outage window is visible
+  at a glance without reading history at all.
+
+**D. Breadcrumb the exact moment the page's own logout timer fires**
+(`content/content.js`, `background/service-worker.js`)
+- `guard.js` already posts `{ type: 'LOGOUT_INTERCEPTED', url }` the instant
+  it intercepts a script-driven navigation to `logout.htm` — this is
+  independent of and happens *before* the verification ping resolves.
+  `content.js` currently only acts on it; it should also immediately forward
+  a new message `{ type: 'LOGOUT_INTERCEPT_ATTEMPT', url, at: Date.now() }` to
+  the background worker, which records a `logout-intercept-attempt` history
+  entry right away (not coalesced — each attempt is a distinct, meaningful
+  event).
+- This pins down exactly when the client-side timer fired, separate from
+  when the *verification ping* happened to fail — useful for telling apart
+  "timer fired because the tab was frozen and overran" vs "timer fired right
+  on schedule, and the server had already killed the session before that."
+
+**E. Popup: surface the extra detail**
+(`popup/popup.js`, `popup/popup.css`)
+- Give each history `<li>` a `title` attribute with the full detail string
+  (including `snippet`/`finalUrl` if present) so hovering shows the whole
+  thing without crowding the compact list view.
+- If an entry has `count > 1`, render it as `detail + " (×" + count + ")"`.
+- If `state.deadSince` is set, show "Session expired since {time}" in the
+  status section instead of the current generic label.
+
+### 8.3 Explicitly out of scope for this change
+- No attempt to guess *why* the server killed the session (maintenance vs.
+  concurrent login vs. IP-bound session) — just capture enough raw detail
+  that a human can tell next time it happens. Root-causing the server
+  behavior itself needs another live incident to inspect, not more client
+  code.
+- No change to storage backend/quota handling — the data volume here is
+  trivial (worst case a few hundred small entries, well under `chrome.storage.local`'s default quota).
+
+### 8.4 Implementation steps
+10. **Step 10**: Extend `content/content.js`'s `ping()` to capture
+    `redirected`, `finalUrl`, and a truncated failure `snippet`; forward
+    `LOGOUT_INTERCEPT_ATTEMPT` on guard interception.
+11. **Step 11**: Extend `background/service-worker.js`: richer `pingDirect()`
+    result shape, history coalescing logic, `MAX_HISTORY = 60`, `deadSince`
+    tracking, and the new `LOGOUT_INTERCEPT_ATTEMPT` message handler.
+12. **Step 12**: Update `popup/popup.js`/`popup.css` to show `deadSince` and
+    per-entry detail/count.
+13. **Step 13**: `node --check` all edited files; manually exercise via the
+    live CDP connection (force a ping failure isn't easy to simulate without
+    an actual outage — at minimum verify the coalescing logic with a unit
+    test harness run under plain `node`, since it has no `chrome.*`
+    dependency once state/history are passed in as plain objects).
