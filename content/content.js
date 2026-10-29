@@ -48,7 +48,14 @@
         .then(function (res) {
           return res.text().then(function (text) {
             var ok = res.status === 200 && !res.redirected && text.indexOf('Session Extended') !== -1;
-            lastPingResult = { ok: ok, status: res.status, at: Date.now() };
+            lastPingResult = {
+              ok: ok,
+              status: res.status,
+              at: Date.now(),
+              redirected: res.redirected,
+              finalUrl: res.url
+            };
+            if (!ok) lastPingResult.snippet = text.replace(/\s+/g, ' ').trim().slice(0, 200);
           });
         })
         .catch(function (err) {
@@ -85,6 +92,7 @@
     if (!data || data.source !== SRC_GUARD) return;
 
     if (data.type === 'LOGOUT_INTERCEPTED') {
+      send({ type: 'LOGOUT_INTERCEPT_ATTEMPT', url: data.url, at: Date.now() });
       ping().then(function (result) {
         window.postMessage(
           { source: SRC_CONTENT, type: result.ok ? 'LOGOUT_BLOCKED' : 'ALLOW_LOGOUT' },

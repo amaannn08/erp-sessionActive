@@ -8,6 +8,7 @@
     dot: document.getElementById('statusDot'),
     label: document.getElementById('statusLabel'),
     countdown: document.getElementById('countdown'),
+    countdownSub: document.querySelector('.countdown-sub'),
     lastPingTime: document.getElementById('lastPingTime'),
     lastPingStatus: document.getElementById('lastPingStatus'),
     pingNowBtn: document.getElementById('pingNowBtn'),
@@ -40,6 +41,13 @@
     return '';
   }
 
+  function historyTitle(entry) {
+    var title = entry.detail || entry.type;
+    if (entry.snippet) title += ' — ' + entry.snippet;
+    if (entry.finalUrl) title += ' [' + entry.finalUrl + ']';
+    return title;
+  }
+
   function render(state) {
     currentState = state;
 
@@ -69,6 +77,13 @@
 
     els.countdown.textContent = state.noTabs && remainMs == null ? '--:--' : fmtClock(remainMs);
 
+    if (els.countdownSub) {
+      els.countdownSub.textContent =
+        state.deadSince && expired
+          ? 'Session expired since ' + fmtTime(state.deadSince)
+          : 'remaining before 30-min idle logout';
+    }
+
     if (state.lastPing) {
       els.lastPingTime.textContent = fmtTime(state.lastPing.at);
       els.lastPingStatus.textContent = state.lastPing.ok
@@ -85,11 +100,14 @@
     (state.history || []).slice(0, 8).forEach(function (entry) {
       var li = document.createElement('li');
       li.className = historyClass(entry.type);
+      li.title = historyTitle(entry);
       var time = document.createElement('span');
       time.className = 'time';
       time.textContent = fmtTime(entry.at);
       var detail = document.createElement('span');
-      detail.textContent = entry.detail || entry.type;
+      var text = entry.detail || entry.type;
+      if (entry.count > 1) text += ' (×' + entry.count + ')';
+      detail.textContent = text;
       li.appendChild(time);
       li.appendChild(detail);
       els.historyList.appendChild(li);

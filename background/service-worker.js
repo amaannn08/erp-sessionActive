@@ -13,7 +13,7 @@ var KEEPALIVE_URL = 'https://erp.iitkgp.ac.in/IIT_ERP3/keepAlive.htm';
 var HEARTBEAT_ALARM = 'heartbeat';
 var RETRY_ALARM = 'retry';
 var STORAGE_KEY = 'ekState';
-var MAX_HISTORY = 30;
+var MAX_HISTORY = 60;
 var RETRY_DELAYS_MIN = [0.5, 0.5, 1, 2, 2]; // backoff, capped; index by (failures-1)
 
 var DEFAULT_STATE = {
@@ -24,7 +24,8 @@ var DEFAULT_STATE = {
   lastSuccessAt: null,
   consecutiveFailures: 0,
   noTabs: false,
-  history: [] // [{ at, type, detail }]
+  deadSince: null, // epoch ms since the current ok->fail incident began, or null
+  history: [] // [{ at, lastAt, count, type, detail, status?, redirected?, finalUrl?, snippet? }]
 };
 
 // ---------------- storage helpers ----------------
@@ -46,13 +47,50 @@ async function setState(patch) {
   return next;
 }
 
-function pushHistory(state, type, detail) {
-  var entry = { at: Date.now(), type: type, detail: detail };
-  var history = [entry].concat(state.history || []).slice(0, MAX_HISTORY);
-  return history;
+// Decide whether a candidate entry should be merged into the most recent
+// history entry instead of appended as a new one: same type, and for ping
+// entries also the same status + redirected flag (so e.g. a run of
+// identical "status 200, not redirected" failures collapses into one entry
+// with a growing count instead of flooding the ring buffer).
+function matchesPrev(prev, entry) {
+  if (!prev || prev.type !== entry.type) return false;
+  if (entry.type === 'ping-ok' || entry.type === 'ping-fail') {
+    return prev.status === entry.status && prev.redirected === entry.redirected;
+  }
+  return true;
+}
+
+// Append `entry` to state.history, coalescing into history[0] when
+// matchesPrev() says they represent the same ongoing condition. The first
+// occurrence's detail/snippet/finalUrl are kept on merge (most informative);
+// only `lastAt` and `count` change.
+function appendOrCoalesce(state, entry) {
+  var history = state.history || [];
+  var prev = history[0];
+  if (matchesPrev(prev, entry)) {
+    var merged = Object.assign({}, prev, { lastAt: entry.at, count: (prev.count || 1) + 1 });
+    return [merged].concat(history.slice(1)).slice(0, MAX_HISTORY);
+  }
+  var fresh = Object.assign({ count: 1, lastAt: entry.at }, entry);
+  return [fresh].concat(history).slice(0, MAX_HISTORY);
+}
+
+// Always append a brand-new entry, bypassing coalescing — for events where
+// every single occurrence is individually meaningful (e.g. the page's own
+// logout timer firing).
+function appendFresh(state, entry) {
+  var history = state.history || [];
+  var fresh = Object.assign({ count: 1, lastAt: entry.at }, entry);
+  return [fresh].concat(history).slice(0, MAX_HISTORY);
 }
 
 // ---------------- badge ----------------
+
+function expiredTitle(state) {
+  var title = 'Server session has expired';
+  if (state.deadSince) title += ' (expired since ' + new Date(state.deadSince).toLocaleTimeString() + ')';
+  return title;
+}
 
 function computeBadge(state) {
   if (!state.enabled) return { text: 'OFF', color: '#9ca3af', title: 'Keep-alive is paused' };
@@ -65,12 +103,12 @@ function computeBadge(state) {
     if (state.lastPing.error) {
       return { text: 'NET', color: '#f59e0b', title: 'Heartbeat failed (network). Retrying...' };
     }
-    return { text: 'EXP', color: '#ef4444', title: 'Server session has expired' };
+    return { text: 'EXP', color: '#ef4444', title: expiredTitle(state) };
   }
 
   if (state.expiry) {
     var remainMin = Math.round((state.expiry - Date.now()) / 60000);
-    if (remainMin <= 0) return { text: 'EXP', color: '#ef4444', title: 'Server session has expired' };
+    if (remainMin <= 0) return { text: 'EXP', color: '#ef4444', title: expiredTitle(state) };
     var color = remainMin < 10 ? '#f59e0b' : '#10b981';
     return { text: remainMin + 'm', color: color, title: remainMin + ' minutes remaining' };
   }
@@ -128,7 +166,9 @@ async function pingDirect() {
     var res = await fetch(KEEPALIVE_URL, { credentials: 'include', cache: 'no-store' });
     var text = await res.text();
     var ok = res.status === 200 && !res.redirected && text.indexOf('Session Extended') !== -1;
-    return { ok: ok, status: res.status, at: Date.now(), source: 'sw' };
+    var result = { ok: ok, status: res.status, at: Date.now(), source: 'sw', redirected: res.redirected, finalUrl: res.url };
+    if (!ok) result.snippet = text.replace(/\s+/g, ' ').trim().slice(0, 200);
+    return result;
   } catch (e) {
     return { ok: false, status: 0, error: String(e), at: Date.now(), source: 'sw' };
   }
@@ -151,7 +191,9 @@ async function recordPingResult(result, meta) {
   if (result.ok) {
     patch.consecutiveFailures = 0;
     patch.lastSuccessAt = result.at;
+    patch.deadSince = null;
   } else {
+    if (!state.consecutiveFailures) patch.deadSince = result.at;
     patch.consecutiveFailures = (state.consecutiveFailures || 0) + 1;
   }
 
@@ -161,7 +203,17 @@ async function recordPingResult(result, meta) {
     ? 'Ping failed: ' + result.error
     : 'Ping returned status ' + result.status + ' (session likely expired)';
 
-  patch.history = pushHistory(state, result.ok ? 'ping-ok' : 'ping-fail', detail);
+  var entry = {
+    at: result.at,
+    type: result.ok ? 'ping-ok' : 'ping-fail',
+    detail: detail,
+    status: result.status,
+    redirected: result.redirected
+  };
+  if (result.finalUrl) entry.finalUrl = result.finalUrl;
+  if (result.snippet) entry.snippet = result.snippet;
+
+  patch.history = appendOrCoalesce(state, entry);
 
   var next = await setState(patch);
   await refreshBadge(next);
@@ -251,14 +303,31 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 
     case 'LOGOUT_BLOCKED': {
       getState().then(function (state) {
-        return setState({ history: pushHistory(state, 'logout-blocked', 'Automatic logout intercepted — session was still alive') });
+        var entry = { at: Date.now(), type: 'logout-blocked', detail: 'Automatic logout intercepted — session was still alive' };
+        return setState({ history: appendOrCoalesce(state, entry) });
       });
       return false;
     }
 
     case 'LOGOUT_ALLOWED': {
       getState().then(function (state) {
-        return setState({ history: pushHistory(state, 'logout-allowed', 'Server session had actually expired — logout allowed') });
+        var entry = { at: Date.now(), type: 'logout-allowed', detail: 'Server session had actually expired — logout allowed' };
+        return setState({ history: appendOrCoalesce(state, entry) });
+      });
+      return false;
+    }
+
+    case 'LOGOUT_INTERCEPT_ATTEMPT': {
+      getState().then(function (state) {
+        var at = msg.at || Date.now();
+        var entry = {
+          at: at,
+          type: 'logout-intercept-attempt',
+          detail: "Page's own session timer tried to log out at " + new Date(at).toLocaleTimeString()
+        };
+        return setState({ history: appendFresh(state, entry) });
+      }).then(function (next) {
+        refreshBadge(next);
       });
       return false;
     }
